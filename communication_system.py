@@ -3,18 +3,16 @@ from commpy.channelcoding import cyclic_code_genpoly
 from commpy.utilities import decimal2bitarray as dec2bit
 from commpy.utilities import bitarray2dec as bit2dec
 from commpy.utilities import upsample
-from commpy.modulation import PSKModem, QAMModem
+
 from commpy.filters import rcosfilter
-from commpy.impairments import add_frequency_offset
 import math
 import numpy as np
-import matplotlib.pyplot as plt
+
 from scipy import interpolate as interp
 from scipy.signal import firwin
-import os
-
 
 # generate random binary sequence set
+
 
 def gen_rand_code(code_len, sample_num):
     return np.random.randint(0, 2, [sample_num, code_len], dtype=np.uint8)
@@ -110,9 +108,8 @@ def modulate(data, modulator, timing_err=False):
 
 # function convert Eb to SNR
 def EbN02SNR(EbN0, sign_bit, samp_rate):
-    EbN0 = np.arange(9)
-    EsN0 = EbN0 + 10*math.log10(2)
-    SNR = EsN0 - 10*math.log10(8)
+    EsN0 = EbN0 + 10*math.log10(sign_bit)
+    SNR = EsN0 - 10*math.log10(samp_rate)
     return SNR
 
 
@@ -126,6 +123,7 @@ def rand_ggd(rho, gamma, shape):
 
     X = np.random.uniform(0, 1, *[shape])
     return cdf_inv(X)
+
 
 # add noise to signal
 def add_noise(signal, noise_type, snr):
@@ -159,6 +157,6 @@ def old_receiver(input_data, modulator, decoder):
     # 匹配滤波,符号判决,汉明解码
     recover_signs_data = (demod_data.reshape([len(demod_data), -1, 8]) * h_norm.reshape([1, 1, 8])).sum(2)
     receive_data = [modulator.demodulate(recover_signs, 'hard') for recover_signs in recover_signs_data]
-    decoded_data = decoder.decode(receive_data)
+    decoded_data = decoder.decode(np.array(receive_data))
 
     return decoded_data

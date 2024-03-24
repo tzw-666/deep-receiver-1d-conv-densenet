@@ -2,10 +2,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from IPython import display
-import matplotlib.pyplot as plt
 import random
 import numpy as np
+
+# loss_function
 
 
 # construction of blocks
@@ -17,7 +17,7 @@ class BasicBlock(nn.Module):
         self.add_module("conv", nn.Conv1d(in_ch, out_ch, k_size, padding=k_size//2))
 
     def forward(self, X):
-        for blk in self._models:
+        for blk in self._modules.values():
             X = blk(X)
         return X
 
@@ -31,9 +31,9 @@ class DenseBlock(nn.Module):
             in_ch += ch_num
 
     def forward(self, X):
-        for blk in self._modules:
+        for blk in self._modules.values():
             Y = blk(X)
-            X = torch.cat([X, Y])
+            X = torch.cat([X, Y], dim=1)
         return X
 
     def out_ch(self):
@@ -47,19 +47,19 @@ class TransBlock(nn.Module):
         self.add_module("pool", nn.MaxPool1d(pool_k_size, pool_step, padding=pool_k_size//2))
 
     def forward(self, X):
-        for blk in self._models:
+        for blk in self._modules.values():
             X = blk(X)
         return X
 
 # the class of structure of the 1D-Conv-DensNet
 class Conv_DenseNet_1D(nn.Module):
 
-    loss = F.cross_entropy
     device = torch.device('cuda:0')
 
-    def __init__(self):
+    def __init__(self, bit_num):
         super().__init__()
         # 密连接部分
+        self.bit_num = bit_num
         dense_part = nn.Sequential()
         dense_part.add_module("conv1", nn.Conv1d(2, 64, 3, 1, 1))
         dense_part.add_module("trans_blk1", TransBlock(64, 128, 3, 3, 2))
@@ -73,31 +73,36 @@ class Conv_DenseNet_1D(nn.Module):
         dense_part.add_module("conv2", nn.Conv1d(64 * 3 + 64, 150, 3, 1, 1))
         self.add_module("dense_part", dense_part)
         # 全局池化部分
-        pool_part = {
-            "max_pool": nn.AdaptiveMaxPool1d(1),
-            "avg_pool": nn.AdaptiveAvgPool1d(1),
-        }
-        self._pools = pool_part
-        self.add_module("global_pool_part", nn.Sequential(pool_part))
-        # 全连接部分
-        self.add_module("lin_part", nn.Linear(300, 32*2))
+        pool_part = nn.Sequential()
+        pool_part.add_module("max_pool", nn.AdaptiveMaxPool1d(1))
+        pool_part.add_module("avg_pool", nn.AdaptiveAvgPool1d(1))
+        self.add_module("global_pool_part", pool_part)
 
-    def __call__(self, X):
-        return self.forward(X)
+        # 全连接部分
+        self.add_module("lin_part", nn.Sequential(nn.Linear(300, self.bit_num*2)))
+
+    def init(self):
+        for m in self.modules():
+            if hasattr(m, "weight"):
+                nn.init.xavier_normal_(m.weight.data.unsqueeze(0))
+        self.to(self.device)
+
+    def loss(self, Y_hat, y):
+        return F.cross_entropy(Y_hat.reshape([-1, 2]), y.reshape([-1]))
 
     def forward(self, X):
         models = self._modules
         pool_part = models["global_pool_part"]
         Y = models["dense_part"](X)
         feature_vec = torch.cat([pool_part[0](Y), pool_part[1](Y)], dim=1)
-        y = models["lin_part"](feature_vec)
-        return y.reshape([-1, 32, 2])
+        y = models["lin_part"](feature_vec.flatten(1))
+        return y.reshape([-1, self.bit_num, 2])
 
     def predict(self, X):
-        torch.no_grad()
-        self.eval()
-        Y_hat = self(X)
-        y_hat = torch.argmax(Y_hat, dim=Y_hat.dim()-1)
+        with torch.no_grad():
+            self.eval()
+            Y_hat = self(X)
+            y_hat = torch.argmax(Y_hat, dim=Y_hat.dim()-1)
         return y_hat
 
 
@@ -118,12 +123,24 @@ def split_data(data_set, split_rate, shuffle=True):
     return data_parts
 
 
-def load_data(data_set, batch_size):
+def load_data(data_set, batch_size, shuffle=False):
     feature, label = data_set
-    data_num = len(feature)
+
+    # convert IQ sequence to sequence ((real_part_sequence),(imaginary_part_sequence))
+    real_feature = np.concatenate([feature.real, feature.imag], axis=1)
+    real_feature = real_feature.reshape([len(feature), 2, -1])
+    real_feature = torch.tensor(real_feature, dtype=torch.float)
+    label = torch.tensor(label)
+
+    data_num = len(real_feature)
+    indices = np.arange(data_num)
+
+    if shuffle:
+        random.shuffle(indices)
+
     for start in range(0, data_num, batch_size):
         end = min(start+batch_size, data_num)
-        yield feature[start:end], label[start:end]
+        yield real_feature[indices[start:end]], label[indices[start:end]]
 
 
 def run_epoch(net, data_set, batch_size, optimizer=None):
@@ -139,11 +156,11 @@ def run_epoch(net, data_set, batch_size, optimizer=None):
             loss.backward()
             with torch.no_grad():
                 optimizer.step()
-                y_hat = torch.argmax(Y_hat, dim=len(Y_hat.shape)-1)
+                y_hat = torch.argmax(Y_hat, dim=Y_hat.dim()-1)
         else:
             y_hat = net.predict(X)
         err_bits += torch.sum(~(y_hat == y))
-    return err_bits.cpu() / len(data_set)
+    return err_bits.cpu() / (len(data_set[0]) * net.bit_num)
 
 
 def train(net, data_set, batch_size, lr, lr_gain, epochs, steady_epochs, momentum):
@@ -163,3 +180,4 @@ def train(net, data_set, batch_size, lr, lr_gain, epochs, steady_epochs, momentu
         # 记一次lr稳定的epoch
         steady_epoch += 1
     return train_ebr_log
+
